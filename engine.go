@@ -719,9 +719,17 @@ func (p *Parser) Parse() []Node {
 	return nodes
 }
 
+// Global Package level declaration cleanly exported to script.go
+func stripQuotes(s string) string {
+	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '`' && s[len(s)-1] == '`') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
 func (p *Parser) parseExpr() Node {
 	switch p.tok {
-	case scanner.Ident: // FIXED: Replaced accidental '{' with correct ':' switch syntax
+	case scanner.Ident: 
 		tag := p.s.TokenText()
 		p.next()
 
