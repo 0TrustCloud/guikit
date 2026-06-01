@@ -318,6 +318,34 @@ func (gk *GUIKit) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// FIX: Intercept dynamic GUIScript controller states natively without falling back to reflection boundaries
+		if scriptComp, ok := comp.(*ScriptComponent); ok {
+			_, err := scriptComp.InvokeEvent(msg.Event, msg.Data)
+			if err != nil {
+				log.Printf("GUIScript Handler Execution Fault: %v", err)
+				continue
+			}
+
+			// Capture a combined map of global settings and state variables
+			renderContextMap := gk.GetGlobalMap()
+			scriptComp.mu.RLock()
+			for k, v := range scriptComp.State {
+				renderContextMap[k] = v
+			}
+			scriptComp.mu.RUnlock()
+
+			rawGML := scriptComp.Render()
+			htmlOut := gk.compileGMLString(rawGML, renderContextMap)
+
+			patch := OutgoingPatch{
+				CompID: msg.CompID,
+				HTML:   htmlOut,
+			}
+			_ = conn.WriteJSON(patch)
+			continue
+		}
+
+		// Fallback tracking loop for standard native Go components
 		val := reflect.ValueOf(comp)
 		method := val.MethodByName(msg.Event)
 		
@@ -717,14 +745,6 @@ func (p *Parser) Parse() []Node {
 		}
 	}
 	return nodes
-}
-
-// Global Package level declaration cleanly exported to script.go
-func stripQuotes(s string) string {
-	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '`' && s[len(s)-1] == '`') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
-		return s[1 : len(s)-1]
-	}
-	return s
 }
 
 func (p *Parser) parseExpr() Node {
