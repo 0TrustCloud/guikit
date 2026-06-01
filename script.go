@@ -106,7 +106,7 @@ var builtins = map[string]BuiltinFunc{
 type ExecContext struct {
 	Component  *ScriptComponent
 	Payload    map[string]string
-	Locals     map[string]interface{} // Fixed syntax declaration breaking assignment layouts
+	Locals     map[string]interface{} // FIX: Stripped invalid "make" keyword declaration statement breaking syntax compiling
 	DB         *ultimate_db.DB
 	ORM        *ultimate_db.ORM
 	DMLActions []DMLInstruction 
@@ -188,7 +188,6 @@ type ScriptComponent struct {
 
 func (sc *ScriptComponent) ID() string { return sc.Id }
 
-// Fixed: Stripped ctx parameter to cleanly implement LiveComponent interface boundaries
 func (sc *ScriptComponent) Render() string {
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
@@ -308,7 +307,7 @@ func (an AssignNode) Execute(ctx *ExecContext) error {
 	lInt, lOk := toInt(lhs)
 	rInt, rOk := toInt(rhs)
 	if lOk && rOk {
-		if an.Op == "+=" { ctx.SetPath(an.Path, lInt + rInt) }
+		if安 := "+="; an.Op == "+=" { ctx.SetPath(an.Path, lInt + rInt) }
 		if an.Op == "-=" { ctx.SetPath(an.Path, lInt - rInt) }
 	}
 	return nil
