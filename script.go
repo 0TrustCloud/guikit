@@ -1,7 +1,6 @@
 package guikit
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -13,9 +12,6 @@ import (
 
 	"github.com/0TrustCloud/ultimate_db"
 )
-
-// AppFS serves as the global filesystem handle required by the microkernel components
-var AppFS fs.FS
 
 var errReturnSignal = errors.New("return statement reached")
 
@@ -110,7 +106,7 @@ var builtins = map[string]BuiltinFunc{
 type ExecContext struct {
 	Component  *ScriptComponent
 	Payload    map[string]string
-	Locals     map[string]interface{}
+	Locals     make(map[string]interface{})
 	DB         *ultimate_db.DB
 	ORM        *ultimate_db.ORM
 	DMLActions []DMLInstruction 
@@ -128,7 +124,7 @@ func (ctx *ExecContext) ResolvePath(path string) interface{} {
 		current = val
 	} else {
 		ctx.Component.mu.RLock()
-		val, exists := ctx.Component.state[parts[0]]
+		val, exists := ctx.Component.State[parts[0]]
 		ctx.Component.mu.RUnlock()
 		if exists { current = val }
 	}
@@ -155,7 +151,7 @@ func (ctx *ExecContext) SetPath(path string, val interface{}) {
 			return
 		}
 		ctx.Component.mu.Lock()
-		ctx.Component.state[parts[0]] = val
+		ctx.Component.State[parts[0]] = val
 		ctx.Component.mu.Unlock()
 		return
 	}
@@ -163,7 +159,7 @@ func (ctx *ExecContext) SetPath(path string, val interface{}) {
 	var current interface{}
 	if val, exists := ctx.Locals[parts[0]]; exists { current = val } else {
 		ctx.Component.mu.Lock()
-		current = ctx.Component.state[parts[0]]
+		current = ctx.Component.State[parts[0]]
 		ctx.Component.mu.Unlock()
 	}
 
@@ -179,23 +175,24 @@ func (ctx *ExecContext) SetPath(path string, val interface{}) {
 }
 
 type ScriptComponent struct {
-	id         string
-	gmlPath    string
-	scriptPath string
-	state      map[string]interface{}
-	handlers   map[string]*ScriptBlock
-	functions  map[string]UserFunction
-	db         *ultimate_db.DB
-	orm        *ultimate_db.ORM
+	Id         string
+	GmlPath    string
+	ScriptPath string
+	State      map[string]interface{}
+	Handlers   map[string]*ScriptBlock
+	Functions  map[string]UserFunction
+	Db         *ultimate_db.DB
+	Orm        *ultimate_db.ORM
 	mu         sync.RWMutex
 }
 
-func (sc *ScriptComponent) ID() string { return sc.id }
-func (sc *ScriptComponent) Render() string {
+func (sc *ScriptComponent) ID() string { return sc.Id }
+func (sc *ScriptComponent) Render(ctx *ExecContext) string {
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
-	input, err := fs.ReadFile(AppFS, sc.gmlPath)
-	if err != nil { return fmt.Sprintf(`<div>GML Source Missing: %s</div>`, sc.gmlPath) }
+	// AppFS is referenced directly from engine.go package scope
+	input, err := fs.ReadFile(AppFS, sc.GmlPath)
+	if err != nil { return fmt.Sprintf(`<div>GML Source Missing: %s</div>`, sc.GmlPath) }
 	return string(input)
 }
 
@@ -259,7 +256,7 @@ type CallExpr struct {
 	Args []Expr
 }
 func (ce CallExpr) Eval(ctx *ExecContext) interface{} {
-	if userFn, exists := ctx.Component.functions[ce.Name]; exists {
+	if userFn, exists := ctx.Component.Functions[ce.Name]; exists {
 		fnCtx := &ExecContext{
 			Component:  ctx.Component,
 			Payload:    ctx.Payload,
@@ -362,7 +359,6 @@ type ScriptParser struct {
 func NewScriptParser(src string) *ScriptParser {
 	var s scanner.Scanner
 	s.Init(strings.NewReader(src))
-	// FIX: Keep identifiers clean. Do not swallow dots or slashes inside the scanning tokens.
 	s.IsIdentRune = func(ch rune, i int) bool {
 		return ch == '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
 	}
@@ -385,6 +381,7 @@ func (p *ScriptParser) Parse(sc *ScriptComponent, namespace string) error {
 				if err := p.parseStateBlock(sc); err != nil { return err }
 
 			} else if keyword == "import" {
+				// stripQuotes is pulled natively from engine.go package scope
 				modulePath := stripQuotes(p.s.TokenText())
 				p.next()
 				moduleSrc, err := fs.ReadFile(AppFS, modulePath+".gs")
@@ -408,7 +405,7 @@ func (p *ScriptParser) Parse(sc *ScriptComponent, namespace string) error {
 				p.next() 
 				bodyBlock, err := p.parseBlock()
 				if err != nil { return err }
-				sc.functions[funcName] = UserFunction{Params: params, Body: bodyBlock.Statements}
+				sc.Functions[funcName] = UserFunction{Params: params, Body: bodyBlock.Statements}
 
 			} else if keyword == "handle" && namespace == "" {
 				eventName := p.s.TokenText()
@@ -416,7 +413,7 @@ func (p *ScriptParser) Parse(sc *ScriptComponent, namespace string) error {
 				p.next() 
 				block, err := p.parseBlock()
 				if err != nil { return err }
-				sc.handlers[eventName] = block
+				sc.Handlers[eventName] = block
 			}
 		} else {
 			p.next()
@@ -433,7 +430,7 @@ func (p *ScriptParser) parseStateBlock(sc *ScriptComponent) error {
 			p.next() 
 			val, err := p.parseStateValue()
 			if err != nil { return err }
-			sc.state[key] = val
+			sc.State[key] = val
 		} else {
 			p.next()
 		}
@@ -585,12 +582,14 @@ func (p *ScriptParser) parsePrimary() (Expr, error) {
 	if p.tok == scanner.Int {
 		val, _ := strconv.Atoi(p.s.TokenText())
 		p.next()
-		return LiteralExpr{Value: val}
+		// FIXED: Returns tuple (Expr, error) matching signature rules
+		return LiteralExpr{Value: val}, nil
 	}
 	if p.tok == scanner.String || p.tok == scanner.RawString {
 		val := stripQuotes(p.s.TokenText())
 		p.next()
-		return LiteralExpr{Value: val}
+		// FIXED: Returns tuple (Expr, error) matching signature rules
+		return LiteralExpr{Value: val}, nil
 	}
 	if p.tok == scanner.Ident {
 		text := p.parseDottedIdentifier()
@@ -611,14 +610,13 @@ func (p *ScriptParser) parsePrimary() (Expr, error) {
 	return nil, errors.New("expression parsing error tree terminal mismatch")
 }
 
-// FIX: Helper evaluator loop to extract structural paths like dml.setValue or data.slug correctly
 func (p *ScriptParser) parseDottedIdentifier() string {
 	ident := p.s.TokenText()
 	p.next()
 	for p.tok == '.' {
-		p.next() // consume dot
+		p.next() 
 		ident += "." + p.s.TokenText()
-		p.next() // consume sub-ident
+		p.next() 
 	}
 	return ident
 }
@@ -627,31 +625,24 @@ func (p *ScriptParser) parseDottedIdentifier() string {
 // 4. Framework Hook Integration Layer
 // ==========================================
 
-type GUIKit struct {
-	DB  *ultimate_db.DB
-	ORM *ultimate_db.ORM
-}
-
-func (gk *GUIKit) RegisterComponent(sc *ScriptComponent) {}
-
-func (gk *GUIKit) LoadScriptComponent(id string, viewPath string) (*ScriptComponent, error) {
+func LoadScriptComponent(gk *guikit.GUIKit, id string, viewPath string) (*ScriptComponent, error) {
 	sc := &ScriptComponent{
-		id:         id,
-		gmlPath:    viewPath + ".gml",
-		scriptPath: viewPath + ".gs",
-		state:      make(map[string]interface{}),
-		handlers:   make(map[string]*ScriptBlock),
-		functions:  make(map[string]UserFunction),
-		db:         gk.DB,
-		orm:        gk.ORM,
+		Id:         id,
+		GmlPath:    viewPath + ".gml",
+		ScriptPath: viewPath + ".gs",
+		State:      make(map[string]interface{}),
+		Handlers:   make(map[string]*ScriptBlock),
+		Functions:  make(map[string]UserFunction),
+		Db:         gk.DB,
+		Orm:        gk.ORM,
 	}
 
-	scriptContent, err := fs.ReadFile(AppFS, sc.scriptPath)
+	scriptContent, err := fs.ReadFile(AppFS, sc.ScriptPath)
 	if err != nil { return nil, fmt.Errorf("target controller source missing: %w", err) }
 
 	parser := NewScriptParser(string(scriptContent))
 	if err := parser.Parse(sc, ""); err != nil {
-		return nil, fmt.Errorf("compilation failure in %s: %w", sc.scriptPath, err)
+		return nil, fmt.Errorf("compilation failure in %s: %w", sc.ScriptPath, err)
 	}
 
 	gk.RegisterComponent(sc)
@@ -660,7 +651,7 @@ func (gk *GUIKit) LoadScriptComponent(id string, viewPath string) (*ScriptCompon
 
 func (sc *ScriptComponent) InvokeEvent(name string, data map[string]string) ([]DMLInstruction, error) {
 	sc.mu.Lock()
-	block, exists := sc.handlers[name]
+	block, exists := sc.Handlers[name]
 	sc.mu.Unlock()
 
 	if !exists { return nil, fmt.Errorf("handler %s unconfigured", name) }
@@ -669,8 +660,8 @@ func (sc *ScriptComponent) InvokeEvent(name string, data map[string]string) ([]D
 		Component:  sc,
 		Payload:    data,
 		Locals:     make(map[string]interface{}),
-		DB:         sc.db,
-		ORM:        sc.orm,
+		DB:         sc.Db,
+		ORM:        sc.Orm,
 		DMLActions: []DMLInstruction{},
 	}
 
@@ -678,32 +669,4 @@ func (sc *ScriptComponent) InvokeEvent(name string, data map[string]string) ([]D
 		if err := stmt.Execute(ctx); err != nil && err != errReturnSignal { return nil, err }
 	}
 	return ctx.DMLActions, nil
-}
-
-// ==========================================
-// 5. Shared Type Fallbacks
-// ==========================================
-
-func stripQuotes(s string) string {
-	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '`' && s[len(s)-1] == '`') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
-		return s[1 : len(s)-1]
-	}
-	return s
-}
-
-func toInt(v interface{}) (int, bool) {
-	switch val := v.(type) {
-	case int: return val, true
-	case float64: return int(val), true
-	case string:
-		if i, err := strconv.Atoi(val); err == nil { return i, true }
-	}
-	return 0, false
-}
-
-func toBool(v interface{}) bool {
-	if b, ok := v.(bool); ok { return b }
-	if i, ok := toInt(v); ok { return i != 0 }
-	if s, ok := v.(string); ok { return s != "" && s != "false" }
-	return v != nil
 }
