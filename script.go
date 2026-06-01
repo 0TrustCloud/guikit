@@ -206,6 +206,13 @@ type Expr interface {
 	Eval(ctx *ExecContext) interface{}
 }
 
+// FIX: New execution statement node to cleanly support void standalone function calls
+type ExprStmt struct { Expression Expr }
+func (es ExprStmt) Execute(ctx *ExecContext) error {
+	es.Expression.Eval(ctx)
+	return nil
+}
+
 type LiteralExpr struct{ Value interface{} }
 func (le LiteralExpr) Eval(ctx *ExecContext) interface{} { return le.Value }
 
@@ -235,7 +242,7 @@ func (be BinaryExpr) Eval(ctx *ExecContext) interface{} {
 		case "==": return lInt == rInt
 		case "!=": return lInt != rInt
 		case "<":  return lInt < rInt
-		case ">":  return lInt < rInt
+		case ">":  return lInt > rInt
 		case "<=": return lInt <= rInt
 		case ">=": return lInt >= rInt
 		}
@@ -360,6 +367,10 @@ func NewScriptParser(src string) *ScriptParser {
 	var s scanner.Scanner
 	s.Init(strings.NewReader(src))
 	s.IsIdentRune = func(ch rune, i int) bool {
+		// FIX: Prevent integers from being scanned as identifiers
+		if i == 0 {
+			return ch == '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+		}
 		return ch == '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
 	}
 	p := &ScriptParser{s: s}
@@ -482,6 +493,18 @@ func (p *ScriptParser) parseBlock() (*ScriptBlock, error) {
 				expr, err := p.parseExpression(0)
 				if err != nil { return nil, err }
 				block.Statements = append(block.Statements, ReturnNode{Expression: expr})
+			} else if p.tok == '(' {
+				// FIX: Properly parses and logs standalone script function calls 
+				p.next()
+				call := CallExpr{Name: ident, Args: []Expr{}}
+				for p.tok != ')' && p.tok != scanner.EOF {
+					arg, err := p.parseExpression(0)
+					if err != nil { return nil, err }
+					call.Args = append(call.Args, arg)
+					if p.tok == ',' { p.next() }
+				}
+				if p.tok == ')' { p.next() }
+				block.Statements = append(block.Statements, ExprStmt{Expression: call})
 			} else {
 				node, err := p.parseAssignment(ident)
 				if err != nil { return nil, err }
@@ -631,7 +654,7 @@ func LoadScriptComponent(gk *GUIKit, id string, viewPath string) (*ScriptCompone
 		Handlers:   make(map[string]*ScriptBlock),
 		Functions:  make(map[string]UserFunction),
 		Db:         gk.DB,
-		ORM:        gk.ORM,
+		Orm:        gk.ORM,
 	}
 
 	scriptContent, err := fs.ReadFile(AppFS, sc.ScriptPath)
@@ -658,7 +681,7 @@ func (sc *ScriptComponent) InvokeEvent(name string, data map[string]string) ([]D
 		Payload:    data,
 		Locals:     make(map[string]interface{}),
 		DB:         sc.Db,
-		ORM:        sc.ORM,
+		ORM:        sc.Orm,
 		DMLActions: []DMLInstruction{},
 	}
 

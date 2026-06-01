@@ -318,7 +318,6 @@ func (gk *GUIKit) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// FIX: Intercept dynamic GUIScript controller states natively without falling back to reflection boundaries
 		if scriptComp, ok := comp.(*ScriptComponent); ok {
 			_, err := scriptComp.InvokeEvent(msg.Event, msg.Data)
 			if err != nil {
@@ -326,7 +325,6 @@ func (gk *GUIKit) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			// Capture a combined map of global settings and state variables
 			renderContextMap := gk.GetGlobalMap()
 			scriptComp.mu.RLock()
 			for k, v := range scriptComp.State {
@@ -345,7 +343,6 @@ func (gk *GUIKit) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Fallback tracking loop for standard native Go components
 		val := reflect.ValueOf(comp)
 		method := val.MethodByName(msg.Event)
 		
@@ -722,11 +719,22 @@ type Parser struct {
 	tok rune
 }
 
+func stripQuotes(s string) string {
+	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '`' && s[len(s)-1] == '`') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
 func NewParser(src string) *Parser {
 	var s scanner.Scanner
 	s.Init(strings.NewReader(src))
 	s.Error = func(s *scanner.Scanner, msg string) {}
 	s.IsIdentRune = func(ch rune, i int) bool {
+		// FIX: Prevent integers from being scanned as identifiers
+		if i == 0 {
+			return ch == '_' || ch == '-' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+		}
 		return ch == '_' || ch == '-' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
 	}
 

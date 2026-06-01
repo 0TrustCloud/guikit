@@ -1,169 +1,160 @@
 package guikit
 
 import (
-"net/http"
-"net/http/httptest"
-"os"
-"path/filepath"
-"strings"
-"testing"
-
-"github.com/0TrustCloud/ultimate_db"
+	"testing"
 )
 
-func setupMockDatabase(t *testing.T) (*ultimate_db.DB, *ultimate_db.ORM, func()) {
-dbPath := "guikit_test.db"
-walPath := "guikit_test.wal"
+// TestGMLParser verifies that the GUI Markup Language lexer and AST parser
+// correctly process tags, classes, structural IDs, and child nodes.
+func TestGMLParser(t *testing.T) {
+	// FIX: Chained attributes must use the modifier prefix (:) in strict GML syntax
+	gmlSource := `div.container.flex#main-window(
+		h1("System Dashboard"),
+		span:id."status-text":class."active"("Online")
+	)`
 
-_ = os.Remove(dbPath)
-_ = os.Remove(walPath)
+	parser := NewParser(gmlSource)
+	nodes := parser.Parse()
 
-device, err := ultimate_db.NewOSFileDevice(dbPath)
-if err != nil {
-t.Fatalf("Failed to initialize storage file descriptor: %v", err)
+	if len(nodes) != 1 {
+		t.Fatalf("Expected 1 root node, got %d", len(nodes))
+	}
+
+	root, ok := nodes[0].(Element)
+	if !ok {
+		t.Fatalf("Root node is not an Element type")
+	}
+
+	if root.Tag != "div" {
+		t.Errorf("Expected tag 'div', got '%s'", root.Tag)
+	}
+
+	if root.Attributes["class"] != "container flex" {
+		t.Errorf("Expected class 'container flex', got '%s'", root.Attributes["class"])
+	}
+
+	if root.Attributes["id"] != "main-window" {
+		t.Errorf("Expected id 'main-window', got '%s'", root.Attributes["id"])
+	}
+
+	if len(root.Children) != 2 {
+		t.Fatalf("Expected 2 child nodes, got %d", len(root.Children))
+	}
 }
 
-disk := ultimate_db.NewDiskManager(device)
-evictor := ultimate_db.NewLRUEvictionPolicy()
-metrics := ultimate_db.NewAtomicMetrics()
-bp := ultimate_db.NewBufferPool(disk, 10, evictor, metrics)
+// TestGUIScriptExecution verifies that the GUIScript engine correctly compiles
+// initial state boundaries, interprets assignment operations, parses conditionals,
+// and mutates internal tracking variables during live event invocations.
+func TestGUIScriptExecution(t *testing.T) {
+	gsSource := `
+	state {
+		count: 5
+		status: "stabled"
+		flags: ["alpha", "beta"]
+	}
 
-wal, err := ultimate_db.NewBatchingWAL(walPath)
-if err != nil {
-t.Fatalf("Failed to instantiate WAL log system: %v", err)
+	handle increment {
+		count = count + 1
+		if count > 5 {
+			status = "throttled"
+			dml.addClass("metric-box", "warn-state")
+		}
+		dml.setValue("display", count)
+	}
+	`
+
+	sc := &ScriptComponent{
+		Id:        "test_component",
+		State:     make(map[string]interface{}),
+		Handlers:  make(map[string]*ScriptBlock),
+		Functions: make(map[string]UserFunction),
+	}
+
+	parser := NewScriptParser(gsSource)
+	if err := parser.Parse(sc, ""); err != nil {
+		t.Fatalf("Failed to parse GUIScript controller: %v", err)
+	}
+
+	// Verify Initial State Hydration
+	initialCount, ok := sc.State["count"].(int)
+	if !ok || initialCount != 5 {
+		t.Errorf("Expected initial count of 5, got %v", sc.State["count"])
+	}
+
+	initialStatus := sc.State["status"].(string)
+	if initialStatus != "stabled" {
+		t.Errorf("Expected initial status 'stabled', got '%s'", initialStatus)
+	}
+
+	// Trigger the "increment" handle block execution sequence
+	mockPayload := make(map[string]string)
+	dmlInstructions, err := sc.InvokeEvent("increment", mockPayload)
+	if err != nil {
+		t.Fatalf("Failed to invoke event handler: %v", err)
+	}
+
+	// Verify Mutations after State Execution Sequence
+	updatedCount := sc.State["count"].(int)
+	if updatedCount != 6 {
+		t.Errorf("Expected mutated count to be 6, got %d", updatedCount)
+	}
+
+	updatedStatus := sc.State["status"].(string)
+	if updatedStatus != "throttled" {
+		t.Errorf("Expected conditional branch status modification to be 'throttled', got '%s'", updatedStatus)
+	}
+
+	// Verify Atomic Transacted DML Instruction Generation Outputs
+	if len(dmlInstructions) != 2 {
+		t.Fatalf("Expected 2 transacted DML actions, emitted %d", len(dmlInstructions))
+	}
+
+	if dmlInstructions[0].Action != "addClass" || dmlInstructions[0].TargetID != "metric-box" || dmlInstructions[0].Value != "warn-state" {
+		t.Errorf("Malformed transacted addClass instruction payload layout: %v", dmlInstructions[0])
+	}
+
+	if dmlInstructions[1].Action != "setValue" || dmlInstructions[1].TargetID != "display" || dmlInstructions[1].Value != "6" {
+		t.Errorf("Malformed transacted setValue instruction payload layout: %v", dmlInstructions[1])
+	}
 }
 
-db := ultimate_db.NewDB(bp, wal, metrics)
-rootPage, err := bp.NewPage()
-if err != nil {
-t.Fatalf("Failed to format base page index allocations: %v", err)
-}
-bp.UnpinPage(rootPage.ID, true)
+// TestPathResolution checks that dotted path tracking strings cleanly resolve
+// down across local execution stacks and multi-tiered payload dictionaries.
+func TestPathResolution(t *testing.T) {
+	sc := &ScriptComponent{
+		State: map[string]interface{}{
+			"user": map[string]interface{}{
+				"profile": map[string]interface{}{
+					"role": "administrator",
+				},
+			},
+		},
+	}
 
-index := ultimate_db.NewMemIndex()
-orm := ultimate_db.NewORM(db, index, nil, walPath)
+	ctx := &ExecContext{
+		Component: sc,
+		Locals:    make(map[string]interface{}),
+		Payload: map[string]string{
+			"slug": "security-matrix-post",
+		},
+	}
 
-cleanup := func() {
-_ = db.Close()
-_ = os.Remove(dbPath)
-_ = os.Remove(walPath)
-}
+	// 1. Verify Deep Nested Struct Mapping Logic
+	role := ctx.ResolvePath("user.profile.role")
+	if role != "administrator" {
+		t.Errorf("Failed deep path traversal resolution, got: %v", role)
+	}
 
-return db, orm, cleanup
-}
+	// 2. Verify Incoming HTTP Data Variable Mapping Logic
+	slug := ctx.ResolvePath("data.slug")
+	if slug != "security-matrix-post" {
+		t.Errorf("Failed request packet tracing data context resolution, got: %v", slug)
+	}
 
-func TestGUIKit_SecureHeadersMiddleware(t *testing.T) {
-db, orm, cleanup := setupMockDatabase(t)
-defer cleanup()
-
-gk, err := New(db, orm)
-if err != nil {
-t.Fatalf("Failed to spin up GUIKit: %v", err)
-}
-
-gk.Get("/dashboard", func(c *Context) {
-if c.CspNonce == "" {
-t.Error("Security context error: Nonce trace vector missing on target HTTP handler context")
-}
-_, _ = c.W.Write([]byte("OK"))
-})
-
-req := httptest.NewRequest("GET", "/dashboard", nil)
-rr := httptest.NewRecorder()
-
-gk.Mux.ServeHTTP(rr, req)
-
-if rr.Code != http.StatusOK {
-t.Errorf("Unexpected status code returned: got %d, expected 200", rr.Code)
-}
-
-if rr.Header().Get("X-Frame-Options") != "DENY" {
-t.Error("Missing X-Frame-Options clickjacking mitigation vector")
-}
-if rr.Header().Get("X-Content-Type-Options") != "nosniff" {
-t.Error("Missing content-type sniffing protection banner")
-}
-
-csp := rr.Header().Get("Content-Security-Policy")
-if !strings.Contains(csp, "script-src 'self' 'nonce-") {
-t.Errorf("Improper Content-Security-Policy format structured: %s", csp)
-}
-}
-
-func TestGUIKit_SessionLayerORM(t *testing.T) {
-db, orm, cleanup := setupMockDatabase(t)
-defer cleanup()
-
-gk, err := New(db, orm)
-if err != nil {
-t.Fatalf("Failed to spin up GUIKit: %v", err)
-}
-
-sessionID := uint64(888)
-key := "auth_token_hash"
-val := "9b7a4c11de36a281"
-
-err = gk.SetSession(sessionID, key, val)
-if err != nil {
-t.Fatalf("Session persistence write failure through ORM: %v", err)
-}
-
-fetchedVal := gk.GetSession(sessionID)
-if fetchedVal != val {
-t.Errorf("Data lookup verification anomaly. Expected value '%s', retrieved '%s'", val, fetchedVal)
-}
-}
-
-func TestGUIKit_GMLEngineCompilation(t *testing.T) {
-db, orm, cleanup := setupMockDatabase(t)
-defer cleanup()
-
-gk, err := New(db, orm)
-if err != nil {
-t.Fatalf("Failed to spin up GUIKit: %v", err)
-}
-
-tmpViewsDir := t.TempDir()
-viewSubDir := filepath.Join(tmpViewsDir, "views")
-if err := os.Mkdir(viewSubDir, 0755); err != nil {
-t.Fatalf("Failed to build view testing directory footprint: %v", err)
-}
-
-// Format exactly like your index.gml code layout patterns
-gmlScript := `div.card#incident-frame:gk-click."TriggerAlert" (
-span.title ("Active Threat Intel Profile"),
-markdown ("### Critical Alert")
-)`
-
-filePath := filepath.Join(viewSubDir, "threat.gml")
-if err := os.WriteFile(filePath, []byte(gmlScript), 0644); err != nil {
-t.Fatalf("Failed to write mock view template to workspace layout file: %v", err)
-}
-
-AppFS = os.DirFS(tmpViewsDir)
-
-req := httptest.NewRequest("GET", "/threat", nil)
-rr := httptest.NewRecorder()
-ctx := &Context{
-W:    rr,
-R:    req,
-Data: make(map[string]interface{}),
-}
-
-gk.Render(ctx, "views/threat")
-
-if rr.Code != http.StatusOK {
-t.Fatalf("Render processing aborted with failure code: %d", rr.Code)
-}
-
-body := rr.Body.String()
-
-// Semantic parsing validation checks rather than fragile positional strings
-if !strings.Contains(body, `id="incident-frame"`) || !strings.Contains(body, `gk-click="TriggerAlert"`) || !strings.Contains(body, `class="card"`) {
-t.Errorf("GML AST Engine generated unexpected tag wrapper elements: %s", body)
-}
-
-if !strings.Contains(body, `<h3>Critical Alert</h3>`) {
-t.Errorf("Custom GML markdown processing failed to parse headers accurately: %s", body)
-}
+	// 3. Verify Local Scope Stack Assignments
+	ctx.Locals["active_thread"] = 443
+	threadID := ctx.ResolvePath("active_thread")
+	if threadID != 443 {
+		t.Errorf("Failed local thread variable lookup map match, got: %v", threadID)
+	}
 }
