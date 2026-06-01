@@ -106,7 +106,7 @@ var builtins = map[string]BuiltinFunc{
 type ExecContext struct {
 	Component  *ScriptComponent
 	Payload    map[string]string
-	Locals     make(map[string]interface{})
+	Locals     map[string]interface{} // Fixed syntax declaration breaking assignment layouts
 	DB         *ultimate_db.DB
 	ORM        *ultimate_db.ORM
 	DMLActions []DMLInstruction 
@@ -187,10 +187,11 @@ type ScriptComponent struct {
 }
 
 func (sc *ScriptComponent) ID() string { return sc.Id }
-func (sc *ScriptComponent) Render(ctx *ExecContext) string {
+
+// Fixed: Stripped ctx parameter to cleanly implement LiveComponent interface boundaries
+func (sc *ScriptComponent) Render() string {
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
-	// AppFS is referenced directly from engine.go package scope
 	input, err := fs.ReadFile(AppFS, sc.GmlPath)
 	if err != nil { return fmt.Sprintf(`<div>GML Source Missing: %s</div>`, sc.GmlPath) }
 	return string(input)
@@ -381,7 +382,6 @@ func (p *ScriptParser) Parse(sc *ScriptComponent, namespace string) error {
 				if err := p.parseStateBlock(sc); err != nil { return err }
 
 			} else if keyword == "import" {
-				// stripQuotes is pulled natively from engine.go package scope
 				modulePath := stripQuotes(p.s.TokenText())
 				p.next()
 				moduleSrc, err := fs.ReadFile(AppFS, modulePath+".gs")
@@ -582,13 +582,11 @@ func (p *ScriptParser) parsePrimary() (Expr, error) {
 	if p.tok == scanner.Int {
 		val, _ := strconv.Atoi(p.s.TokenText())
 		p.next()
-		// FIXED: Returns tuple (Expr, error) matching signature rules
 		return LiteralExpr{Value: val}, nil
 	}
 	if p.tok == scanner.String || p.tok == scanner.RawString {
 		val := stripQuotes(p.s.TokenText())
 		p.next()
-		// FIXED: Returns tuple (Expr, error) matching signature rules
 		return LiteralExpr{Value: val}, nil
 	}
 	if p.tok == scanner.Ident {
@@ -625,7 +623,7 @@ func (p *ScriptParser) parseDottedIdentifier() string {
 // 4. Framework Hook Integration Layer
 // ==========================================
 
-func LoadScriptComponent(gk *guikit.GUIKit, id string, viewPath string) (*ScriptComponent, error) {
+func LoadScriptComponent(gk *GUIKit, id string, viewPath string) (*ScriptComponent, error) {
 	sc := &ScriptComponent{
 		Id:         id,
 		GmlPath:    viewPath + ".gml",
@@ -669,4 +667,21 @@ func (sc *ScriptComponent) InvokeEvent(name string, data map[string]string) ([]D
 		if err := stmt.Execute(ctx); err != nil && err != errReturnSignal { return nil, err }
 	}
 	return ctx.DMLActions, nil
+}
+
+func toInt(v interface{}) (int, bool) {
+	switch val := v.(type) {
+	case int: return val, true
+	case float64: return int(val), true
+	case string:
+		if i, err := strconv.Atoi(val); err == nil { return i, true }
+	}
+	return 0, false
+}
+
+func toBool(v interface{}) bool {
+	if b, ok := v.(bool); ok { return b }
+	if i, ok := toInt(v); ok { return i != 0 }
+	if s, ok := v.(string); ok { return s != "" && s != "false" }
+	return v != nil
 }
