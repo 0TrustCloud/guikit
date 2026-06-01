@@ -106,7 +106,7 @@ var builtins = map[string]BuiltinFunc{
 type ExecContext struct {
 	Component  *ScriptComponent
 	Payload    map[string]string
-	Locals     map[string]interface{} // FIX: Stripped invalid "make" keyword declaration statement breaking syntax compiling
+	Locals     map[string]interface{}
 	DB         *ultimate_db.DB
 	ORM        *ultimate_db.ORM
 	DMLActions []DMLInstruction 
@@ -235,7 +235,7 @@ func (be BinaryExpr) Eval(ctx *ExecContext) interface{} {
 		case "==": return lInt == rInt
 		case "!=": return lInt != rInt
 		case "<":  return lInt < rInt
-		case ">":  return lInt > rInt
+		case ">":  return lInt < rInt
 		case "<=": return lInt <= rInt
 		case ">=": return lInt >= rInt
 		}
@@ -307,7 +307,7 @@ func (an AssignNode) Execute(ctx *ExecContext) error {
 	lInt, lOk := toInt(lhs)
 	rInt, rOk := toInt(rhs)
 	if lOk && rOk {
-		if安 := "+="; an.Op == "+=" { ctx.SetPath(an.Path, lInt + rInt) }
+		if an.Op == "+=" { ctx.SetPath(an.Path, lInt + rInt) }
 		if an.Op == "-=" { ctx.SetPath(an.Path, lInt - rInt) }
 	}
 	return nil
