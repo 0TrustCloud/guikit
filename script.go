@@ -631,7 +631,7 @@ func LoadScriptComponent(gk *GUIKit, id string, viewPath string) (*ScriptCompone
 		Handlers:   make(map[string]*ScriptBlock),
 		Functions:  make(map[string]UserFunction),
 		Db:         gk.DB,
-		Orm:        gk.ORM,
+		ORM:        gk.ORM,
 	}
 
 	scriptContent, err := fs.ReadFile(AppFS, sc.ScriptPath)
@@ -658,7 +658,7 @@ func (sc *ScriptComponent) InvokeEvent(name string, data map[string]string) ([]D
 		Payload:    data,
 		Locals:     make(map[string]interface{}),
 		DB:         sc.Db,
-		ORM:        sc.Orm,
+		ORM:        sc.ORM,
 		DMLActions: []DMLInstruction{},
 	}
 
