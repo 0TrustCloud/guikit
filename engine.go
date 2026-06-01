@@ -719,16 +719,9 @@ func (p *Parser) Parse() []Node {
 	return nodes
 }
 
-func stripQuotes(s string) string {
-	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '`' && s[len(s)-1] == '`')) {
-		return s[1 : len(s)-1]
-	}
-	return s
-}
-
 func (p *Parser) parseExpr() Node {
 	switch p.tok {
-	case scanner.Ident {
+	case scanner.Ident: // FIXED: Replaced accidental '{' with correct ':' switch syntax
 		tag := p.s.TokenText()
 		p.next()
 
@@ -747,7 +740,7 @@ func (p *Parser) parseExpr() Node {
 			} else if modifier == ':' {
 				attrName := stripQuotes(p.s.TokenText())
 				p.next()
-				attrValue = "true"
+				attrValue := "true"
 
 				if p.tok == '.' {
 					p.next()
@@ -775,7 +768,7 @@ func (p *Parser) parseExpr() Node {
 			if p.tok == ')' { p.next() }
 		}
 		return Element{Tag: tag, Attributes: attrs, Children: children}
-	}
+
 	case scanner.String, scanner.RawString:
 		val := stripQuotes(p.s.TokenText())
 		p.next()
