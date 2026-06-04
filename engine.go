@@ -717,6 +717,7 @@ func (t Text) Eval() string { return string(t) }
 type Parser struct {
 	s   scanner.Scanner
 	tok rune
+	lit string
 }
 
 func stripQuotes(s string) string {
@@ -730,8 +731,8 @@ func NewParser(src string) *Parser {
 	var s scanner.Scanner
 	s.Init(strings.NewReader(src))
 	s.Error = func(s *scanner.Scanner, msg string) {}
+	s.Mode = scanner.ScanIdents | scanner.ScanInts | scanner.SkipComments
 	s.IsIdentRune = func(ch rune, i int) bool {
-		// FIX: Prevent integers from being scanned as identifiers
 		if i == 0 {
 			return ch == '_' || ch == '-' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
 		}
@@ -743,7 +744,46 @@ func NewParser(src string) *Parser {
 	return p
 }
 
-func (p *Parser) next() { p.tok = p.s.Scan() }
+func (p *Parser) TokenText() string {
+	if p.lit != "" {
+		return p.lit
+	}
+	return p.s.TokenText()
+}
+
+func (p *Parser) next() {
+	p.lit = ""
+	tok := p.s.Scan()
+	
+	if tok == '\'' || tok == '"' || tok == '`' {
+		quoteClose := tok
+		var buf strings.Builder
+		buf.WriteRune(quoteClose)
+		escaped := false
+		for {
+			r := p.s.Next()
+			if r == scanner.EOF {
+				break
+			}
+			buf.WriteRune(r)
+			if escaped {
+				escaped = false
+				continue
+			}
+			if r == '\\' {
+				escaped = true
+				continue
+			}
+			if r == quoteClose {
+				break
+			}
+		}
+		p.tok = scanner.String
+		p.lit = buf.String()
+	} else {
+		p.tok = tok
+	}
+}
 
 func (p *Parser) Parse() []Node {
 	var nodes []Node
@@ -758,7 +798,7 @@ func (p *Parser) Parse() []Node {
 func (p *Parser) parseExpr() Node {
 	switch p.tok {
 	case scanner.Ident: 
-		tag := p.s.TokenText()
+		tag := p.TokenText()
 		p.next()
 
 		attrs := make(map[string]string)
@@ -767,20 +807,20 @@ func (p *Parser) parseExpr() Node {
 			p.next()
 
 			if modifier == '.' {
-				className := stripQuotes(p.s.TokenText())
+				className := stripQuotes(p.TokenText())
 				p.next()
 				attrs["class"] = strings.TrimSpace(attrs["class"] + " " + className)
 			} else if modifier == '#' {
-				attrs["id"] = stripQuotes(p.s.TokenText())
+				attrs["id"] = stripQuotes(p.TokenText())
 				p.next()
 			} else if modifier == ':' {
-				attrName := stripQuotes(p.s.TokenText())
+				attrName := stripQuotes(p.TokenText())
 				p.next()
 				attrValue := "true"
 
 				if p.tok == '.' {
 					p.next()
-					attrValue = stripQuotes(p.s.TokenText())
+					attrValue = stripQuotes(p.TokenText())
 					p.next()
 				}
 
@@ -806,7 +846,7 @@ func (p *Parser) parseExpr() Node {
 		return Element{Tag: tag, Attributes: attrs, Children: children}
 
 	case scanner.String, scanner.RawString:
-		val := stripQuotes(p.s.TokenText())
+		val := stripQuotes(p.TokenText())
 		p.next()
 		return Text(val)
 

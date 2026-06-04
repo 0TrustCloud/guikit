@@ -206,7 +206,6 @@ type Expr interface {
 	Eval(ctx *ExecContext) interface{}
 }
 
-// FIX: New execution statement node to cleanly support void standalone function calls
 type ExprStmt struct { Expression Expr }
 func (es ExprStmt) Execute(ctx *ExecContext) error {
 	es.Expression.Eval(ctx)
@@ -361,13 +360,14 @@ func (fn ForNode) Execute(ctx *ExecContext) error {
 type ScriptParser struct {
 	s   scanner.Scanner
 	tok rune
+	lit string
 }
 
 func NewScriptParser(src string) *ScriptParser {
 	var s scanner.Scanner
 	s.Init(strings.NewReader(src))
+	s.Mode = scanner.ScanIdents | scanner.ScanInts | scanner.SkipComments
 	s.IsIdentRune = func(ch rune, i int) bool {
-		// FIX: Prevent integers from being scanned as identifiers
 		if i == 0 {
 			return ch == '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
 		}
@@ -378,12 +378,51 @@ func NewScriptParser(src string) *ScriptParser {
 	return p
 }
 
-func (p *ScriptParser) next() { p.tok = p.s.Scan() }
+func (p *ScriptParser) TokenText() string {
+	if p.lit != "" {
+		return p.lit
+	}
+	return p.s.TokenText()
+}
+
+func (p *ScriptParser) next() {
+	p.lit = ""
+	tok := p.s.Scan()
+	
+	if tok == '\'' || tok == '"' || tok == '`' {
+		quoteClose := tok
+		var buf strings.Builder
+		buf.WriteRune(quoteClose)
+		escaped := false
+		for {
+			r := p.s.Next()
+			if r == scanner.EOF {
+				break
+			}
+			buf.WriteRune(r)
+			if escaped {
+				escaped = false
+				continue
+			}
+			if r == '\\' {
+				escaped = true
+				continue
+			}
+			if r == quoteClose {
+				break
+			}
+		}
+		p.tok = scanner.String
+		p.lit = buf.String()
+	} else {
+		p.tok = tok
+	}
+}
 
 func (p *ScriptParser) Parse(sc *ScriptComponent, namespace string) error {
 	for p.tok != scanner.EOF {
 		if p.tok == scanner.Ident {
-			keyword := p.s.TokenText()
+			keyword := p.TokenText()
 			p.next()
 
 			if keyword == "state" && namespace == "" {
@@ -392,7 +431,7 @@ func (p *ScriptParser) Parse(sc *ScriptComponent, namespace string) error {
 				if err := p.parseStateBlock(sc); err != nil { return err }
 
 			} else if keyword == "import" {
-				modulePath := stripQuotes(p.s.TokenText())
+				modulePath := stripQuotes(p.TokenText())
 				p.next()
 				moduleSrc, err := fs.ReadFile(AppFS, modulePath+".gs")
 				if err != nil { return fmt.Errorf("module lookup unresolvable: %s", modulePath) }
@@ -401,13 +440,13 @@ func (p *ScriptParser) Parse(sc *ScriptComponent, namespace string) error {
 				if err := subParser.Parse(sc, ns); err != nil { return err }
 
 			} else if keyword == "func" {
-				funcName := p.s.TokenText()
+				funcName := p.TokenText()
 				if namespace != "" { funcName = namespace + "." + funcName }
 				p.next() 
 				p.next() 
 				params := []string{}
 				for p.tok != ')' && p.tok != scanner.EOF {
-					if p.tok == scanner.Ident { params = append(params, p.s.TokenText()) }
+					if p.tok == scanner.Ident { params = append(params, p.TokenText()) }
 					p.next()
 					if p.tok == ',' { p.next() }
 				}
@@ -418,7 +457,7 @@ func (p *ScriptParser) Parse(sc *ScriptComponent, namespace string) error {
 				sc.Functions[funcName] = UserFunction{Params: params, Body: bodyBlock.Statements}
 
 			} else if keyword == "handle" && namespace == "" {
-				eventName := p.s.TokenText()
+				eventName := p.TokenText()
 				p.next() 
 				p.next() 
 				block, err := p.parseBlock()
@@ -435,7 +474,7 @@ func (p *ScriptParser) Parse(sc *ScriptComponent, namespace string) error {
 func (p *ScriptParser) parseStateBlock(sc *ScriptComponent) error {
 	for p.tok != '}' && p.tok != scanner.EOF {
 		if p.tok == scanner.Ident {
-			key := p.s.TokenText()
+			key := p.TokenText()
 			p.next()
 			p.next() 
 			val, err := p.parseStateValue()
@@ -451,12 +490,12 @@ func (p *ScriptParser) parseStateBlock(sc *ScriptComponent) error {
 
 func (p *ScriptParser) parseStateValue() (interface{}, error) {
 	if p.tok == scanner.Int {
-		val, _ := strconv.Atoi(p.s.TokenText())
+		val, _ := strconv.Atoi(p.TokenText())
 		p.next()
 		return val, nil
 	}
 	if p.tok == scanner.String || p.tok == scanner.RawString {
-		val := stripQuotes(p.s.TokenText())
+		val := stripQuotes(p.TokenText())
 		p.next()
 		return val, nil
 	}
@@ -472,7 +511,7 @@ func (p *ScriptParser) parseStateValue() (interface{}, error) {
 		if p.tok == ']' { p.next() }
 		return arr, nil
 	}
-	return nil, fmt.Errorf("invalid state format configuration sequence near %s", p.s.TokenText())
+	return nil, fmt.Errorf("invalid state format configuration sequence near %s", p.TokenText())
 }
 
 func (p *ScriptParser) parseBlock() (*ScriptBlock, error) {
@@ -494,7 +533,6 @@ func (p *ScriptParser) parseBlock() (*ScriptBlock, error) {
 				if err != nil { return nil, err }
 				block.Statements = append(block.Statements, ReturnNode{Expression: expr})
 			} else if p.tok == '(' {
-				// FIX: Properly parses and logs standalone script function calls 
 				p.next()
 				call := CallExpr{Name: ident, Args: []Expr{}}
 				for p.tok != ')' && p.tok != scanner.EOF {
@@ -529,7 +567,7 @@ func (p *ScriptParser) parseIf() (IfNode, error) {
 	if err != nil { return node, err }
 	node.Body = bodyBlock.Statements
 
-	if p.tok == scanner.Ident && p.s.TokenText() == "else" {
+	if p.tok == scanner.Ident && p.TokenText() == "else" {
 		p.next() 
 		p.next() 
 		elseBlock, err := p.parseBlock()
@@ -541,7 +579,7 @@ func (p *ScriptParser) parseIf() (IfNode, error) {
 
 func (p *ScriptParser) parseFor() (ForNode, error) {
 	node := ForNode{}
-	node.IteratorKey = p.s.TokenText()
+	node.IteratorKey = p.TokenText()
 	p.next() 
 	p.next() 
 	node.IterableKey = p.parseDottedIdentifier()
@@ -555,10 +593,10 @@ func (p *ScriptParser) parseFor() (ForNode, error) {
 
 func (p *ScriptParser) parseAssignment(path string) (AssignNode, error) {
 	node := AssignNode{Path: path}
-	op := p.s.TokenText()
+	op := p.TokenText()
 	if op == "+" || op == "-" {
 		p.next()
-		op += p.s.TokenText()
+		op += p.TokenText()
 	}
 	node.Op = op
 	p.next() 
@@ -580,12 +618,12 @@ func (p *ScriptParser) parseExpression(precedence int) (Expr, error) {
 	if err != nil { return nil, err }
 
 	for {
-		tokText := p.s.TokenText()
+		tokText := p.TokenText()
 		if p.tok == '&' || p.tok == '|' || p.tok == '=' || p.tok == '!' || p.tok == '<' || p.tok == '>' {
 			lookahead := p.s.Peek()
 			if (p.tok == '&' && lookahead == '&') || (p.tok == '|' && lookahead == '|') || (lookahead == '=') {
 				p.next()
-				tokText += p.s.TokenText()
+				tokText += p.TokenText()
 			}
 		}
 
@@ -602,12 +640,12 @@ func (p *ScriptParser) parseExpression(precedence int) (Expr, error) {
 
 func (p *ScriptParser) parsePrimary() (Expr, error) {
 	if p.tok == scanner.Int {
-		val, _ := strconv.Atoi(p.s.TokenText())
+		val, _ := strconv.Atoi(p.TokenText())
 		p.next()
 		return LiteralExpr{Value: val}, nil
 	}
 	if p.tok == scanner.String || p.tok == scanner.RawString {
-		val := stripQuotes(p.s.TokenText())
+		val := stripQuotes(p.TokenText())
 		p.next()
 		return LiteralExpr{Value: val}, nil
 	}
@@ -631,11 +669,11 @@ func (p *ScriptParser) parsePrimary() (Expr, error) {
 }
 
 func (p *ScriptParser) parseDottedIdentifier() string {
-	ident := p.s.TokenText()
+	ident := p.TokenText()
 	p.next()
 	for p.tok == '.' {
 		p.next() 
-		ident += "." + p.s.TokenText()
+		ident += "." + p.TokenText()
 		p.next() 
 	}
 	return ident
