@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -40,13 +41,23 @@ var voidElements = map[string]bool{
 }
 
 var (
-	rxH3      = regexp.MustCompile(`(?m)^### (.*)$`)
-	rxH2      = regexp.MustCompile(`(?m)^## (.*)$`)
-	rxH1      = regexp.MustCompile(`(?m)^# (.*)$`)
-	rxBold    = regexp.MustCompile(`\*\*(.*?)\*\*`)
-	rxItalic  = regexp.MustCompile(`\*(.*?)\*`)
-	rxMention = regexp.MustCompile(`@([a-zA-Z0-9_][a-zA-Z0-9_-]*)`)
-	rxHashtag = regexp.MustCompile(`\B#([a-zA-Z0-9_]+)`)
+	rxH3          = regexp.MustCompile(`(?m)^### (.*)$`)
+	rxH2          = regexp.MustCompile(`(?m)^## (.*)$`)
+	rxH1          = regexp.MustCompile(`(?m)^# (.*)$`)
+	rxBold       = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	rxItalicStar = regexp.MustCompile(`\*([^*\n]+)\*`)
+	rxInlineCode = regexp.MustCompile("`([^`\n]+)`")
+	rxLink        = regexp.MustCompile(`\[([^\]]+)\]\((https?://[^)\s]+)\)`)
+	rxMention     = regexp.MustCompile(`@([a-zA-Z0-9_][a-zA-Z0-9_-]*)`)
+	rxHashtag     = regexp.MustCompile(`\B#([a-zA-Z][a-zA-Z0-9_]*)`)
+	rxImage       = regexp.MustCompile(`!\[([^\]]*)\]\((https?://[^)\s]+)\)`)
+	rxFence       = regexp.MustCompile("(?s)```([a-zA-Z0-9_-]*)\\n(.*?)```")
+	rxHR          = regexp.MustCompile(`(?m)^(?:---|\*\*\*|___)\s*$`)
+	rxBlockQuote  = regexp.MustCompile(`(?m)^&gt; (.*)$`)
+	rxUL          = regexp.MustCompile(`(?m)^(?:[-*+]) (.*)$`)
+	rxOL          = regexp.MustCompile(`(?m)^\d+\. (.*)$`)
+	rxBareGIF     = regexp.MustCompile(`(?m)^(https?://[^\s<]+\.(?:gif|webp|mp4|webm)(?:\?[^\s<]*)?)\s*$`)
+	rxSocialCDN   = regexp.MustCompile(`(?m)^(https?://(?:www\.)?0trust\.social/c/[A-Za-z0-9]+(?:\?[^\s<]*)?)\s*$`)
 )
 
 type contextKey string
@@ -159,6 +170,18 @@ func New(db *ultimate_db.DB, orm *ultimate_db.ORM) (*GUIKit, error) {
 	return gk, nil
 }
 
+// SetCheckOrigin configures WebSocket origin validation. Products should reject
+// cross-site WS upgrades (OWASP A01 / CSRF-adjacent abuse).
+func (gk *GUIKit) SetCheckOrigin(fn func(r *http.Request) bool) {
+	if gk == nil {
+		return
+	}
+	if fn == nil {
+		fn = func(r *http.Request) bool { return false }
+	}
+	gk.upgrader.CheckOrigin = fn
+}
+
 func (gk *GUIKit) SetGlobal(key string, value interface{}) {
 	gk.globalDataMu.Lock()
 	defer gk.globalDataMu.Unlock()
@@ -215,7 +238,7 @@ func (gk *GUIKit) SecureHeaders(next http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		
-		csp := fmt.Sprintf("default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; script-src 'self' 'nonce-%s'; img-src * data: blob:;", nonce)
+		csp := fmt.Sprintf("default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; script-src 'self' 'nonce-%s'; img-src * data: blob:; media-src * data: blob:;", nonce)
 		w.Header().Set("Content-Security-Policy", csp)
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		
@@ -432,7 +455,7 @@ func (gk *GUIKit) Render(c *Context, viewPath string) {
 				return "W"
 			},
 			"markdown": func(s string) template.HTML {
-				return template.HTML(gk.formatMarkdown(s))
+				return template.HTML(formatMarkdown(s))
 			},
 		}
 
@@ -496,7 +519,7 @@ func (gk *GUIKit) compileGMLString(script string, data map[string]interface{}) s
 			return "W"
 		},
 		"markdown": func(s string) template.HTML {
-			return template.HTML(gk.formatMarkdown(s))
+			return template.HTML(formatMarkdown(s))
 		},
 	}
 
@@ -513,16 +536,192 @@ func (gk *GUIKit) compileGMLString(script string, data map[string]interface{}) s
 	return finalOutput.String()
 }
 
-func (gk *GUIKit) formatMarkdown(s string) string {
-	content := html.EscapeString(s)
+func isSafeMediaURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if strings.HasSuffix(host, "tenor.com") || strings.HasSuffix(host, "giphy.com") || strings.HasSuffix(host, "imgur.com") {
+		return true
+	}
+	if host == "0trust.social" || strings.HasSuffix(host, ".0trust.social") {
+		return strings.HasPrefix(strings.ToLower(u.Path), "/c/")
+	}
+	path := strings.ToLower(u.Path)
+	return strings.HasSuffix(path, ".gif") || strings.HasSuffix(path, ".webp") || strings.HasSuffix(path, ".mp4") ||
+		strings.HasSuffix(path, ".png") || strings.HasSuffix(path, ".jpg") || strings.HasSuffix(path, ".jpeg")
+}
+
+func renderMediaTag(rawURL, alt string) string {
+	if !isSafeMediaURL(rawURL) {
+		return html.EscapeString(rawURL)
+	}
+	alt = html.EscapeString(strings.TrimSpace(alt))
+	urlEsc := html.EscapeString(rawURL)
+	lower := strings.ToLower(rawURL)
+	altLower := strings.ToLower(strings.TrimSpace(alt))
+	if altLower == "audio" {
+		return `<audio class="md-audio" controls preload="metadata" src="` + urlEsc + `"></audio>`
+	}
+	// Prefer <img> for gif/webp/png/jpg. Use <video> for mp4/webm and for
+	// giphy/tenor URLs that are not clearly raster (legacy posts used mp4).
+	pathOnly := lower
+	if i := strings.IndexByte(pathOnly, '?'); i >= 0 {
+		pathOnly = pathOnly[:i]
+	}
+	isRaster := strings.HasSuffix(pathOnly, ".gif") || strings.HasSuffix(pathOnly, ".webp") ||
+		strings.HasSuffix(pathOnly, ".png") || strings.HasSuffix(pathOnly, ".jpg") ||
+		strings.HasSuffix(pathOnly, ".jpeg")
+	isGiphyTenor := strings.Contains(lower, "giphy.com") || strings.Contains(lower, "tenor.com")
+	looksVideo := altLower == "video" ||
+		strings.HasSuffix(pathOnly, ".mp4") || strings.HasSuffix(pathOnly, ".webm") ||
+		(isGiphyTenor && !isRaster && (altLower == "gif" || altLower == "" ||
+			strings.Contains(lower, ".mp4") || strings.Contains(lower, ".webm")))
+	if looksVideo {
+		return `<video class="md-gif" src="` + urlEsc + `" autoplay loop muted playsinline preload="metadata"></video>`
+	}
+	return `<img class="md-gif" src="` + urlEsc + `" alt="` + alt + `" loading="lazy" decoding="async">`
+}
+
+func formatMarkdown(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return ""
+	}
+	placeholders := make(map[string]string)
+	idx := 0
+	hold := func(htmlOut string) string {
+		key := fmt.Sprintf("⟦MDPH%d⟧", idx)
+		idx++
+		placeholders[key] = htmlOut
+		return key
+	}
+
+	// Normalize newlines first
+	content := strings.ReplaceAll(s, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+
+	// Fenced code before escaping
+	content = rxFence.ReplaceAllStringFunc(content, func(match string) string {
+		parts := rxFence.FindStringSubmatch(match)
+		if len(parts) < 3 {
+			return match
+		}
+		code := html.EscapeString(parts[2])
+		code = strings.TrimRight(code, "\n")
+		lang := html.EscapeString(parts[1])
+		cls := ""
+		if lang != "" {
+			cls = ` class="language-` + lang + `"`
+		}
+		return hold("<pre><code" + cls + ">" + code + "</code></pre>")
+	})
+
+	// Images / media before escape
+	content = rxImage.ReplaceAllStringFunc(content, func(match string) string {
+		parts := rxImage.FindStringSubmatch(match)
+		if len(parts) < 3 {
+			return match
+		}
+		return hold(renderMediaTag(parts[2], parts[1]))
+	})
+	content = rxBareGIF.ReplaceAllStringFunc(content, func(match string) string {
+		return hold(renderMediaTag(strings.TrimSpace(match), "gif"))
+	})
+	content = rxSocialCDN.ReplaceAllStringFunc(content, func(match string) string {
+		return hold(renderMediaTag(strings.TrimSpace(match), "image"))
+	})
+
+	// Links before escape (keep safe https only)
+	content = rxLink.ReplaceAllStringFunc(content, func(match string) string {
+		parts := rxLink.FindStringSubmatch(match)
+		if len(parts) < 3 {
+			return match
+		}
+		label := html.EscapeString(parts[1])
+		href := html.EscapeString(parts[2])
+		return hold(`<a href="` + href + `" rel="noopener noreferrer" target="_blank">` + label + `</a>`)
+	})
+
+	content = html.UnescapeString(content)
+	content = html.EscapeString(content)
+
+	// Block structure (escaped text)
+	content = rxHR.ReplaceAllString(content, "<hr>")
 	content = rxH3.ReplaceAllString(content, "<h3>$1</h3>")
 	content = rxH2.ReplaceAllString(content, "<h2>$1</h2>")
 	content = rxH1.ReplaceAllString(content, "<h1>$1</h1>")
+	content = rxBlockQuote.ReplaceAllString(content, "<blockquote>$1</blockquote>")
+
+	// Lists: group consecutive items
+	content = collapseMarkdownLists(content, rxUL, "ul")
+	content = collapseMarkdownLists(content, rxOL, "ol")
+
+	// Inline
+	content = rxInlineCode.ReplaceAllString(content, "<code>$1</code>")
 	content = rxBold.ReplaceAllString(content, "<strong>$1</strong>")
-	content = rxItalic.ReplaceAllString(content, "<em>$1</em>")
+	content = rxItalicStar.ReplaceAllString(content, "<em>$1</em>")
 	content = rxMention.ReplaceAllString(content, `<a href="/u/$1" style="color:rgb(29, 155, 240); text-decoration:none; font-weight:bold;">@$1</a>`)
 	content = rxHashtag.ReplaceAllString(content, `<a href="/search?q=%23$1" style="color:rgb(29, 155, 240); text-decoration:none; font-weight:bold;">#$1</a>`)
-	return strings.ReplaceAll(content, "\n\n", "<br><br>")
+
+	// Paragraphs: split on blank lines, wrap non-block lines
+	content = wrapMarkdownParagraphs(content)
+
+	for key, tag := range placeholders {
+		content = strings.ReplaceAll(content, key, tag)
+	}
+	return content
+}
+
+func collapseMarkdownLists(content string, itemRe *regexp.Regexp, tag string) string {
+	lines := strings.Split(content, "\n")
+	var out []string
+	var buf []string
+	flush := func() {
+		if len(buf) == 0 {
+			return
+		}
+		out = append(out, "<"+tag+">"+strings.Join(buf, "")+"</"+tag+">")
+		buf = buf[:0]
+	}
+	for _, line := range lines {
+		if m := itemRe.FindStringSubmatch(line); m != nil {
+			buf = append(buf, "<li>"+m[1]+"</li>")
+			continue
+		}
+		flush()
+		out = append(out, line)
+	}
+	flush()
+	return strings.Join(out, "\n")
+}
+
+func wrapMarkdownParagraphs(content string) string {
+	blocks := strings.Split(content, "\n\n")
+	for i, b := range blocks {
+		b = strings.TrimSpace(b)
+		if b == "" {
+			blocks[i] = ""
+			continue
+		}
+		// Already a block element
+		if strings.HasPrefix(b, "<h") || strings.HasPrefix(b, "<ul") || strings.HasPrefix(b, "<ol") ||
+			strings.HasPrefix(b, "<pre") || strings.HasPrefix(b, "<blockquote") || strings.HasPrefix(b, "<hr") ||
+			strings.HasPrefix(b, "⟦MDPH") || strings.HasPrefix(b, "<p") {
+			blocks[i] = b
+			continue
+		}
+		// Single newlines inside a paragraph → <br>
+		b = strings.ReplaceAll(b, "\n", "<br>")
+		blocks[i] = "<p>" + b + "</p>"
+	}
+	var parts []string
+	for _, b := range blocks {
+		if b != "" {
+			parts = append(parts, b)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (gk *GUIKit) Run() {
@@ -644,6 +843,10 @@ func (e Element) Eval() string {
 		content, err := fs.ReadFile(AppFS, filename)
 		if err != nil { return "" }
 
+		if strings.HasSuffix(strings.ToLower(filename), ".js") {
+			return "<script nonce=\"{{.CspNonce}}\">\n" + string(content) + "\n</script>"
+		}
+
 		var builder strings.Builder
 		for _, node := range NewParser(string(content)).Parse() {
 			builder.WriteString(node.Eval())
@@ -671,16 +874,15 @@ func (e Element) Eval() string {
 			return fmt.Sprintf("{{ markdown %s }}", inner)
 		}
 
-		content = html.EscapeString(content)
-		content = rxH3.ReplaceAllString(content, "<h3>$1</h3>")
-		content = rxH2.ReplaceAllString(content, "<h2>$1</h2>")
-		content = rxH1.ReplaceAllString(content, "<h1>$1</h1>")
-		content = rxBold.ReplaceAllString(content, "<strong>$1</strong>")
-		content = rxItalic.ReplaceAllString(content, "<em>$1</em>")
-		content = rxMention.ReplaceAllString(content, `<a href="/u/$1" style="color:rgb(29, 155, 240); text-decoration:none; font-weight:bold;">@$1</a>`)
-		content = rxHashtag.ReplaceAllString(content, `<a href="/search?q=%23$1" style="color:rgb(29, 155, 240); text-decoration:none; font-weight:bold;">#$1</a>`)
+		return formatMarkdown(content)
+	}
 
-		return strings.ReplaceAll(content, "\n\n", "<br><br>")
+	if tag == "script" {
+		if _, hasSrc := e.Attributes["src"]; !hasSrc {
+			if _, hasNonce := e.Attributes["nonce"]; !hasNonce {
+				e.Attributes["nonce"] = "{{.CspNonce}}"
+			}
+		}
 	}
 
 	var builder strings.Builder
@@ -868,20 +1070,35 @@ func (gk *GUIKit) serveJS(w http.ResponseWriter, r *http.Request) {
 const guikitJS = `
 class GUIKitClient {
     constructor() {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        this.ws = new WebSocket(protocol + '//' + window.location.host + '/ws');
-        this.initWebSocket();
+        this.reconnectDelay = 1000;
+        this.connect();
         this.initEventListeners();
     }
-    initWebSocket() {
+    connect() {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        this.ws = new WebSocket(protocol + '//' + window.location.host + '/ws');
+        this.ws.onopen = () => { this.reconnectDelay = 1000; };
         this.ws.onmessage = (event) => {
-            const patch = JSON.parse(event.data);
-            if (patch.id && patch.html) {
-                const targetElement = document.getElementById(patch.id);
-                if (targetElement) { targetElement.outerHTML = patch.html; }
+            let data;
+            try { data = JSON.parse(event.data); } catch (e) { return; }
+            if (data.id && data.html) {
+                const targetElement = document.getElementById(data.id);
+                if (targetElement) { targetElement.outerHTML = data.html; }
+            }
+            if (data.event) {
+                window.dispatchEvent(new CustomEvent(data.event, { detail: data.payload }));
             }
         };
-        this.ws.onclose = () => { setTimeout(() => window.location.reload(), 2000); };
+        this.ws.onclose = () => {
+            const delay = this.reconnectDelay;
+            this.reconnectDelay = Math.min(delay * 2, 30000);
+            setTimeout(() => this.connect(), delay);
+        };
+    }
+    send(payload) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify(payload));
+        }
     }
     initEventListeners() {
         document.addEventListener('click', (e) => {
@@ -890,11 +1107,11 @@ class GUIKitClient {
             e.preventDefault();
             const componentRoot = trigger.closest('[id]');
             if (!componentRoot) return;
-            this.ws.send(JSON.stringify({
+            this.send({
                 id: componentRoot.id,
                 event: trigger.getAttribute('gk-click'),
-                data: {} 
-            }));
+                data: {}
+            });
         });
     }
 }

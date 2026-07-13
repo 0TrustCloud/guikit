@@ -1,7 +1,9 @@
 package guikit
 
 import (
+	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // TestGMLParser verifies that the GUI Markup Language lexer and AST parser
@@ -156,5 +158,38 @@ func TestPathResolution(t *testing.T) {
 	threadID := ctx.ResolvePath("active_thread")
 	if threadID != 443 {
 		t.Errorf("Failed local thread variable lookup map match, got: %v", threadID)
+	}
+}
+
+func TestGMLImportJavaScript(t *testing.T) {
+	prev := AppFS
+	t.Cleanup(func() { AppFS = prev })
+
+	AppFS = fstest.MapFS{
+		"demo.js": &fstest.MapFile{Data: []byte("window.demo = 1;")},
+	}
+
+	gml := `import("demo.js")`
+	out := ""
+	for _, n := range NewParser(gml).Parse() {
+		out += n.Eval()
+	}
+
+	if !strings.Contains(out, `nonce="{{.CspNonce}}"`) {
+		t.Fatalf("expected CSP nonce placeholder, got: %s", out)
+	}
+	if !strings.Contains(out, "window.demo = 1;") {
+		t.Fatalf("expected JS body inlined, got: %s", out)
+	}
+}
+
+func TestGMLInlineScriptGetsNonce(t *testing.T) {
+	gml := `script("console.log('ok');")`
+	out := ""
+	for _, n := range NewParser(gml).Parse() {
+		out += n.Eval()
+	}
+	if !strings.Contains(out, `nonce="{{.CspNonce}}"`) {
+		t.Fatalf("expected auto nonce on inline script, got: %s", out)
 	}
 }
